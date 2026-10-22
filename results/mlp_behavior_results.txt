@@ -1,0 +1,18 @@
+IoT-23 Behavior MLP
+Architecture: 17 -> 32 -> 16 -> 3
+Test Accuracy: 0.987800
+
+              precision    recall  f1-score   support
+
+      Normal     0.9684    0.9961    0.9821    149979
+         DoS     0.9990    0.9994    0.9992    149867
+   Port Scan     0.9968    0.9679    0.9821    150154
+
+    accuracy                         0.9878    450000
+   macro avg     0.9881    0.9878    0.9878    450000
+weighted avg     0.9881    0.9878    0.9878    450000
+
+Confusion Matrix:
+[[149401    129    449]
+ [    77 149772     18]
+ [  4794     23 145337]]

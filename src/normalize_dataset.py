@@ -1,33 +1,39 @@
 from pathlib import Path
 import csv
+import random
 import joblib
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 
-# ============================================================
-# CONFIG
-# ============================================================
 
-INPUT_FILE = Path(
-    r"D:\Part4_Data_ESP32\dataset\processed\iot23_balanced.csv"
+BASE_DIR = Path(r"D:\Part4_Data_ESP32")
+
+INPUT_FILE = (
+    BASE_DIR
+    / "dataset"
+    / "processed"
+    / "iot23_balanced_behavior.csv"
 )
 
-OUTPUT_DIR = Path(
-    r"D:\Part4_Data_ESP32\dataset\processed"
+OUTPUT_DIR = BASE_DIR / "dataset" / "processed"
+
+TRAIN_FILE = OUTPUT_DIR / "iot23_behavior_train.csv"
+VAL_FILE = OUTPUT_DIR / "iot23_behavior_val.csv"
+TEST_FILE = OUTPUT_DIR / "iot23_behavior_test.csv"
+
+SCALER_FILE = (
+    OUTPUT_DIR
+    / "standard_scaler_behavior.joblib"
 )
 
-TRAIN_FILE = OUTPUT_DIR / "iot23_train.csv"
-VAL_FILE = OUTPUT_DIR / "iot23_val.csv"
-TEST_FILE = OUTPUT_DIR / "iot23_test.csv"
-
-SCALER_FILE = OUTPUT_DIR / "standard_scaler.joblib"
-
-CHUNK_SIZE = 100_000
-SEED = 42
+RANDOM_SEED = 42
 
 TRAIN_RATIO = 0.70
 VAL_RATIO = 0.15
 TEST_RATIO = 0.15
+
+CHUNK_SIZE = 100_000
+
 
 FEATURES = [
     "id.orig_p",
@@ -41,305 +47,452 @@ FEATURES = [
     "resp_pkts",
     "orig_ip_bytes",
     "resp_ip_bytes",
+
+    "conn_count_10s",
+    "unique_dst_ports_10s",
+    "unique_dst_ips_10s",
+    "failed_conn_count_10s",
+    "failed_ratio_10s",
+    "s0_ratio_10s",
 ]
 
-OUTPUT_COLUMNS = FEATURES + ["class"]
+TARGET = "class"
 
 
-# ============================================================
-# CHECK CONFIG
-# ============================================================
-
-if abs(TRAIN_RATIO + VAL_RATIO + TEST_RATIO - 1.0) > 1e-9:
-    raise ValueError("Train/Val/Test ratio must equal 1.0")
+random.seed(RANDOM_SEED)
+np.random.seed(RANDOM_SEED)
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-rng = np.random.default_rng(SEED)
+
+print("=" * 70)
+print("IoT-23 BEHAVIOR DATASET")
+print("SPLIT FIRST + SCALER FIT ON TRAIN ONLY")
+print("=" * 70)
+
+if not INPUT_FILE.exists():
+    raise FileNotFoundError(
+        f"Dataset not found:\n{INPUT_FILE}"
+    )
+
+print()
+print(f"Input : {INPUT_FILE}")
+print(
+    f"Size  : "
+    f"{INPUT_FILE.stat().st_size / (1024 * 1024):.2f} MB"
+)
 
 
 # ============================================================
 # PASS 1
-# Fit StandardScaler using TRAIN samples only
+# COUNT TOTAL ROWS
 # ============================================================
 
-print("=" * 60)
-print("PASS 1: FIT STANDARD SCALER")
-print("=" * 60)
-
-scaler = StandardScaler()
+print()
+print("=" * 70)
+print("PASS 1: COUNT DATASET")
+print("=" * 70)
 
 total_rows = 0
-train_rows = 0
-val_rows = 0
-test_rows = 0
 
-with open(INPUT_FILE, "r", encoding="utf-8", newline="") as f:
+with open(
+    INPUT_FILE,
+    "r",
+    encoding="utf-8",
+    newline="",
+    buffering=1024 * 1024
+) as f:
 
     reader = csv.DictReader(f)
 
-    for chunk_start in range(0, 3_000_000, CHUNK_SIZE):
+    if reader.fieldnames is None:
+        raise RuntimeError("CSV header not found.")
 
-        rows = []
+    missing = [
+        x for x in FEATURES + [TARGET]
+        if x not in reader.fieldnames
+    ]
 
-        for _ in range(CHUNK_SIZE):
-
-            try:
-                row = next(reader)
-            except StopIteration:
-                break
-
-            rows.append(row)
-
-        if not rows:
-            break
-
-        n = len(rows)
-
-        X = np.array(
-            [
-                [float(row[feature]) for feature in FEATURES]
-                for row in rows
-            ],
-            dtype=np.float64,
+    if missing:
+        raise RuntimeError(
+            f"Missing columns: {missing}"
         )
 
-        # Random split
-        r = rng.random(n)
+    for _ in reader:
+        total_rows += 1
 
-        train_mask = r < TRAIN_RATIO
-        val_mask = (
-            (r >= TRAIN_RATIO)
-            & (r < TRAIN_RATIO + VAL_RATIO)
-        )
-        test_mask = r >= TRAIN_RATIO + VAL_RATIO
-
-        if np.any(train_mask):
-            scaler.partial_fit(X[train_mask])
-            train_rows += int(np.sum(train_mask))
-
-        val_rows += int(np.sum(val_mask))
-        test_rows += int(np.sum(test_mask))
-
-        total_rows += n
-
-        print(
-            f"\rProcessed: {total_rows:,} / 3,000,000",
-            end=""
-        )
-
-print()
-
-print()
 print(f"Total rows : {total_rows:,}")
-print(f"Train      : {train_rows:,}")
-print(f"Validation : {val_rows:,}")
-print(f"Test       : {test_rows:,}")
-
-print()
-print("Scaler mean:")
-for feature, value in zip(FEATURES, scaler.mean_):
-    print(f"    {feature:15s}: {value:.6g}")
-
-print()
-print("Scaler std:")
-for feature, value in zip(FEATURES, scaler.scale_):
-    print(f"    {feature:15s}: {value:.6g}")
 
 
 # ============================================================
-# SAVE SCALER
+# DETERMINE SPLIT COUNTS
 # ============================================================
 
-joblib.dump(scaler, SCALER_FILE)
+train_target = int(total_rows * TRAIN_RATIO)
+val_target = int(total_rows * VAL_RATIO)
+test_target = total_rows - train_target - val_target
 
 print()
-print(f"Scaler saved: {SCALER_FILE}")
+print("Target split:")
+print(f"    Train      : {train_target:,}")
+print(f"    Validation : {val_target:,}")
+print(f"    Test       : {test_target:,}")
 
 
 # ============================================================
 # PASS 2
-# Normalize and write Train / Val / Test
+# CREATE RANDOM SPLIT
 # ============================================================
 
 print()
-print("=" * 60)
-print("PASS 2: NORMALIZE DATASET")
-print("=" * 60)
+print("=" * 70)
+print("PASS 2: CREATE RANDOM SPLIT")
+print("=" * 70)
 
-# Reinitialize RNG so the exact same split is generated
-rng = np.random.default_rng(SEED)
+# Store randomized row assignment only.
+# The actual feature data remains in the original CSV.
 
-# Remove old files if they exist
-for file in [TRAIN_FILE, VAL_FILE, TEST_FILE]:
-    if file.exists():
-        file.unlink()
+indices = list(range(total_rows))
 
+random.Random(RANDOM_SEED).shuffle(indices)
 
-train_out = open(
-    TRAIN_FILE,
-    "w",
-    encoding="utf-8",
-    newline="",
-    buffering=1024 * 1024,
+train_indices = set(indices[:train_target])
+val_indices = set(
+    indices[train_target:train_target + val_target]
 )
 
-val_out = open(
-    VAL_FILE,
-    "w",
+# Remaining rows belong to test.
+# We do not need to store test_indices.
+
+
+print("Random shuffle complete.")
+
+
+# ============================================================
+# PASS 3
+# FIT SCALER ON TRAIN ONLY
+# ============================================================
+
+print()
+print("=" * 70)
+print("PASS 3: FIT STANDARD SCALER ON TRAIN ONLY")
+print("=" * 70)
+
+scaler = StandardScaler()
+
+train_seen = 0
+processed = 0
+
+with open(
+    INPUT_FILE,
+    "r",
     encoding="utf-8",
     newline="",
-    buffering=1024 * 1024,
-)
-
-test_out = open(
-    TEST_FILE,
-    "w",
-    encoding="utf-8",
-    newline="",
-    buffering=1024 * 1024,
-)
-
-train_writer = csv.writer(train_out)
-val_writer = csv.writer(val_out)
-test_writer = csv.writer(test_out)
-
-train_writer.writerow(OUTPUT_COLUMNS)
-val_writer.writerow(OUTPUT_COLUMNS)
-test_writer.writerow(OUTPUT_COLUMNS)
-
-total_rows = 0
-written_train = 0
-written_val = 0
-written_test = 0
-
-with open(INPUT_FILE, "r", encoding="utf-8", newline="") as f:
+    buffering=1024 * 1024
+) as f:
 
     reader = csv.DictReader(f)
 
-    while True:
+    chunk = []
 
-        rows = []
+    for index, row in enumerate(reader):
 
-        for _ in range(CHUNK_SIZE):
+        if index not in train_indices:
+            continue
 
-            try:
-                row = next(reader)
-            except StopIteration:
-                break
+        values = [
+            float(row[feature])
+            for feature in FEATURES
+        ]
 
-            rows.append(row)
+        chunk.append(values)
 
-        if not rows:
-            break
+        if len(chunk) >= CHUNK_SIZE:
 
-        n = len(rows)
+            scaler.partial_fit(
+                np.asarray(
+                    chunk,
+                    dtype=np.float64
+                )
+            )
 
-        X = np.array(
+            train_seen += len(chunk)
+            chunk = []
+
+            print(
+                f"\rTrain scaler: "
+                f"{train_seen:,} / "
+                f"{train_target:,}",
+                end="",
+                flush=True
+            )
+
+    if chunk:
+
+        scaler.partial_fit(
+            np.asarray(
+                chunk,
+                dtype=np.float64
+            )
+        )
+
+        train_seen += len(chunk)
+
+print()
+
+print()
+print(f"Train rows used for scaler: {train_seen:,}")
+
+if train_seen != train_target:
+    raise RuntimeError(
+        "Scaler training row count mismatch."
+    )
+
+
+print()
+print("Scaler mean:")
+
+for feature, value in zip(
+    FEATURES,
+    scaler.mean_
+):
+    print(
+        f"    {feature:24s}: "
+        f"{value:.6g}"
+    )
+
+
+print()
+print("Scaler std:")
+
+for feature, value in zip(
+    FEATURES,
+    scaler.scale_
+):
+    print(
+        f"    {feature:24s}: "
+        f"{value:.6g}"
+    )
+
+
+joblib.dump(
+    scaler,
+    SCALER_FILE
+)
+
+print()
+print("Scaler saved:")
+print(f"    {SCALER_FILE}")
+
+
+# ============================================================
+# PASS 4
+# NORMALIZE + WRITE TRAIN / VAL / TEST
+# ============================================================
+
+print()
+print("=" * 70)
+print("PASS 4: NORMALIZE + WRITE DATASETS")
+print("=" * 70)
+
+
+for file in [
+    TRAIN_FILE,
+    VAL_FILE,
+    TEST_FILE
+]:
+
+    if file.exists():
+        print(f"Removing old file: {file}")
+        file.unlink()
+
+
+train_file = open(
+    TRAIN_FILE,
+    "w",
+    newline="",
+    encoding="utf-8",
+    buffering=1024 * 1024
+)
+
+val_file = open(
+    VAL_FILE,
+    "w",
+    newline="",
+    encoding="utf-8",
+    buffering=1024 * 1024
+)
+
+test_file = open(
+    TEST_FILE,
+    "w",
+    newline="",
+    encoding="utf-8",
+    buffering=1024 * 1024
+)
+
+
+train_writer = csv.writer(train_file)
+val_writer = csv.writer(val_file)
+test_writer = csv.writer(test_file)
+
+
+header = FEATURES + [TARGET]
+
+train_writer.writerow(header)
+val_writer.writerow(header)
+test_writer.writerow(header)
+
+
+train_count = 0
+val_count = 0
+test_count = 0
+
+class_train = {0: 0, 1: 0, 2: 0}
+class_val = {0: 0, 1: 0, 2: 0}
+class_test = {0: 0, 1: 0, 2: 0}
+
+
+with open(
+    INPUT_FILE,
+    "r",
+    encoding="utf-8",
+    newline="",
+    buffering=1024 * 1024
+) as f:
+
+    reader = csv.DictReader(f)
+
+    for index, row in enumerate(reader):
+
+        values = np.asarray(
             [
-                [float(row[feature]) for feature in FEATURES]
-                for row in rows
+                float(row[feature])
+                for feature in FEATURES
             ],
-            dtype=np.float64,
+            dtype=np.float64
         )
 
-        y = np.array(
-            [int(row["class"]) for row in rows],
-            dtype=np.int8,
+        normalized = scaler.transform(
+            values.reshape(1, -1)
+        )[0]
+
+        label = int(row[TARGET])
+
+        output_row = (
+            normalized.tolist()
+            + [label]
         )
 
-        # Same split as PASS 1
-        r = rng.random(n)
+        if index in train_indices:
 
-        train_mask = r < TRAIN_RATIO
+            train_writer.writerow(output_row)
 
-        val_mask = (
-            (r >= TRAIN_RATIO)
-            & (r < TRAIN_RATIO + VAL_RATIO)
-        )
+            train_count += 1
+            class_train[label] += 1
 
-        test_mask = r >= TRAIN_RATIO + VAL_RATIO
+        elif index in val_indices:
 
-        # Normalize
-        X_scaled = scaler.transform(X)
+            val_writer.writerow(output_row)
 
-        # Save as float32 to reduce file size
-        X_scaled = X_scaled.astype(np.float32)
+            val_count += 1
+            class_val[label] += 1
 
-        # -------------------------
-        # TRAIN
-        # -------------------------
+        else:
 
-        train_indices = np.where(train_mask)[0]
+            test_writer.writerow(output_row)
 
-        for i in train_indices:
-            train_writer.writerow(
-                list(X_scaled[i]) + [int(y[i])]
+            test_count += 1
+            class_test[label] += 1
+
+        processed += 1
+
+        if processed % 100_000 == 0:
+
+            print(
+                f"\rProcessed: "
+                f"{processed:,} / "
+                f"{total_rows:,}",
+                end="",
+                flush=True
             )
 
-        written_train += len(train_indices)
 
-        # -------------------------
-        # VALIDATION
-        # -------------------------
+train_file.close()
+val_file.close()
+test_file.close()
 
-        val_indices = np.where(val_mask)[0]
 
-        for i in val_indices:
-            val_writer.writerow(
-                list(X_scaled[i]) + [int(y[i])]
-            )
-
-        written_val += len(val_indices)
-
-        # -------------------------
-        # TEST
-        # -------------------------
-
-        test_indices = np.where(test_mask)[0]
-
-        for i in test_indices:
-            test_writer.writerow(
-                list(X_scaled[i]) + [int(y[i])]
-            )
-
-        written_test += len(test_indices)
-
-        total_rows += n
-
-        print(
-            f"\rProcessed: {total_rows:,} / 3,000,000",
-            end=""
-        )
-
-train_out.close()
-val_out.close()
-test_out.close()
+# ============================================================
+# FINAL CHECK
+# ============================================================
 
 print()
 print()
-print("=" * 60)
+print("=" * 70)
 print("NORMALIZATION FINISHED")
-print("=" * 60)
+print("=" * 70)
 
-print(f"Train      : {written_train:,}")
-print(f"Validation : {written_val:,}")
-print(f"Test       : {written_test:,}")
-print(f"Total      : {written_train + written_val + written_test:,}")
+print()
+print(f"Train      : {train_count:,}")
+print(f"Validation : {val_count:,}")
+print(f"Test       : {test_count:,}")
+
+print(
+    f"Total      : "
+    f"{train_count + val_count + test_count:,}"
+)
+
+
+print()
+print("Class distribution:")
+
+print()
+print("Train:")
+print(f"    Normal    : {class_train[0]:,}")
+print(f"    DoS       : {class_train[1]:,}")
+print(f"    Port Scan : {class_train[2]:,}")
+
+print()
+print("Validation:")
+print(f"    Normal    : {class_val[0]:,}")
+print(f"    DoS       : {class_val[1]:,}")
+print(f"    Port Scan : {class_val[2]:,}")
+
+print()
+print("Test:")
+print(f"    Normal    : {class_test[0]:,}")
+print(f"    DoS       : {class_test[1]:,}")
+print(f"    Port Scan : {class_test[2]:,}")
+
+
+if (
+    train_count
+    + val_count
+    + test_count
+    != total_rows
+):
+    raise RuntimeError(
+        "Final row count mismatch."
+    )
+
 
 print()
 print("Output files:")
-print(f"  {TRAIN_FILE}")
-print(f"  {VAL_FILE}")
-print(f"  {TEST_FILE}")
-print(f"  {SCALER_FILE}")
+print(f"    {TRAIN_FILE}")
+print(f"    {VAL_FILE}")
+print(f"    {TEST_FILE}")
+print(f"    {SCALER_FILE}")
 
 print()
-print("=" * 60)
+print(f"FEATURE COUNT : {len(FEATURES)}")
+print(f"INPUT DIMENSION: {len(FEATURES)}")
 
-if written_train + written_val + written_test == 3_000_000:
-    print("NORMALIZATION: PASS")
-else:
-    print("NORMALIZATION: FAIL")
+print()
+print("DATA LEAKAGE CHECK:")
+print("    Scaler fitted on TRAIN ONLY")
+print("    Validation/Test only transformed")
 
-print("=" * 60)
+print()
+print("NORMALIZATION: PASS")
+print("=" * 70)
