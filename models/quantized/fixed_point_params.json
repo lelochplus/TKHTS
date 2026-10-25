@@ -1,0 +1,15 @@
+{
+    "shift": 24,
+    "h1": {
+        "ratio": 0.00925201342917834,
+        "multiplier": 155223,
+        "reconstructed_ratio": 0.009252011775970459,
+        "absolute_error": 1.6532078813552564e-09
+    },
+    "h2": {
+        "ratio": 0.00324725498155277,
+        "multiplier": 54480,
+        "reconstructed_ratio": 0.0032472610473632812,
+        "absolute_error": 6.065810511431818e-09
+    }
+}
